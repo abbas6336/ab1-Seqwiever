@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <title>Sanger Chromatogram Viewer & FASTA Exporter</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f6f8; margin: 20px; }
+    .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    h2 { margin-top: 0; color: #2c3e50; }
+    .controls { display: flex; gap: 15px; align-items: center; margin-bottom: 15px; flex-wrap: wrap; }
+    .legend { display: flex; gap: 15px; font-weight: bold; margin-bottom: 10px; font-size: 14px; }
+    .leg-a { color: green; } .leg-c { color: blue; } .leg-g { color: black; } .leg-t { color: red; }
+
+    .canvas-container {
+      width: 100%;
+      height: 340px;
+      overflow: auto;
+      border: 1px solid #ccc;
+      background: #fafafa;
+      border-radius: 4px;
+      position: relative;
+    }
+    canvas { display: block; cursor: crosshair; }
+
+    .scroll-controls {
+      display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap;
+      font-size: 13px; color: #555;
+    }
+    .scroll-controls button {
+      background: #34495e; color: white; border: none; padding: 6px 12px;
+      border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 14px;
+    }
+    .scroll-controls button:hover { background: #2c3e50; }
+    .scroll-controls button:active { transform: scale(0.96); }
+    .scroll-controls .label { margin-right: 6px; }
+
+    .size-controls {
+      display: flex; gap: 20px; align-items: center; margin-top: 10px; flex-wrap: wrap;
+      padding: 8px 12px; background: #f0f4f8; border-radius: 6px; font-size: 13px; color: #34495e;
+    }
+    .size-controls .group { display: flex; align-items: center; gap: 8px; }
+    .size-controls input[type=range] { width: 140px; cursor: pointer; }
+    .size-controls .val { font-family: monospace; font-weight: bold; color: #2980b9; min-width: 36px; text-align: center; }
+
+    .editor-section { margin-top: 15px; }
+    textarea { width: 100%; height: 100px; font-family: monospace; font-size: 14px; padding: 10px; box-sizing: border-box; }
+    button.main-btn { background: #27ae60; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; }
+    button.main-btn:hover { background: #219150; }
+    button.secondary { background: #2980b9; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; }
+    button.secondary:hover { background: #21618c; }
+
+    .selection-box { margin-top: 10px; padding: 8px; background: #eef6ff; border: 1px dashed #2980b9; border-radius: 4px; font-family: monospace; font-size: 13px; }
+    .selection-box .label { font-weight: bold; color: #21618c; margin-bottom: 4px; display: block; }
+    #selText { width: 100%; height: 60px; font-family: monospace; font-size: 13px; padding: 6px; box-sizing: border-box; resize: vertical; }
+    .hint { font-size: 12px; color: #666; margin-top: 4px; }
+
+    .tooltip {
+      position: absolute; pointer-events: none; background: rgba(0,0,0,0.85); color: #fff;
+      padding: 4px 8px; border-radius: 4px; font-size: 12px; font-family: monospace;
+      transform: translate(-50%, -140%); display: none; white-space: nowrap; z-index: 50;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h2>Sanger Chromatogram Viewer & FASTA Exporter</h2>
+
+  <div class="controls">
+    <input type="file" id="fileInput" accept=".ab1">
+    <div class="legend">
+      <span class="leg-a">A (Green)</span>
+      <span class="leg-c">C (Blue)</span>
+      <span class="leg-g">G (Black)</span>
+      <span class="leg-t">T (Red)</span>
+    </div>
+  </div>
+
+  <div class="canvas-container" id="canvasWrap">
+    <canvas id="chromaCanvas"></canvas>
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+
+  <div class="size-controls">
+    <div class="group">
+      <label for="heightSlider">Peak Height:</label>
+      <input type="range" id="heightSlider" min="120" max="600" step="10" value="270">
+      <span class="val" id="heightVal">270</span>
+    </div>
+    <div class="group">
+      <label for="widthSlider">Peak Width (Spacing):</label>
+      <input type="range" id="widthSlider" min="10" max="100" step="1" value="25">
+      <span class="val" id="widthVal">2.5</span>
+    </div>
+  </div>
+
+  <div class="scroll-controls">
+    <span class="label">Horizontal Scroll:</span>
+    <button id="scrollLeftBtn"  title="Scroll back">◀</button>
+    <button id="scrollRightBtn" title="Scroll forward">▶</button>
+    <span class="label" style="margin-left:15px;">Vertical Scroll:</span>
+    <button id="scrollUpBtn"   title="Scroll up">▲</button>
+    <button id="scrollDownBtn" title="Scroll down">▼</button>
+  </div>
+
+  <div class="hint">Drag the mouse over the chromatogram to select a range. Moving the mouse to the left/right edges triggers auto-scroll.</div>
+
+  <div class="selection-box">
+    <span class="label">Selected Range (copyable):</span>
+    <textarea id="selText" placeholder="Drag over the chromatogram to select a range..."></textarea>
+    <button id="copySelBtn" class="secondary">Copy Range</button>
+    <span id="selInfo" class="hint"></span>
+  </div>
+
+  <div class="editor-section">
+    <h3>Sequence Editor (FASTA):</h3>
+    <textarea id="seqArea" placeholder="The called sequence will appear here after loading an .ab1 file..."></textarea>
+    <br>
+    <button id="downloadBtn" class="main-btn">Download FASTA</button>
+  </div>
+</div>
+
+<script>
+class ABIParser {
+  constructor(buffer) { this.view = new DataView(buffer); }
+
+  parse() {
+    const magic = String.fromCharCode(this.view.getUint8(0), this.view.getUint8(1), this.view.getUint8(2), this.view.getUint8(3));
+    if (magic !== 'ABIF') throw new Error("The input file is not a valid ABIF file!");
+
+    const dirOffset = this.view.getUint32(26);
+    const numEntries = this.view.getUint32(18);
+
+    let directory = {};
+    for (let i = 0; i < numEntries; i++) {
+      let offset = dirOffset + (i * 28);
+      let name = '';
+      for (let j = 0; j < 4; j++) name += String.fromCharCode(this.view.getUint8(offset + j));
+      let number = this.view.getUint32(offset + 4);
+      let elemType = this.view.getUint16(offset + 8);
+      let elemSize = this.view.getUint16(offset + 10);
+      let numElements = this.view.getUint32(offset + 12);
+      let dataOffset = this.view.getUint32(offset + 20);
+      directory[`${name}_${number}`] = { elemType, elemSize, numElements, dataOffset };
+    }
+
+    const traces = {
+      G: this.getInt16Array(directory['DATA_9']),
+      A: this.getInt16Array(directory['DATA_10']),
+      T: this.getInt16Array(directory['DATA_11']),
+      C: this.getInt16Array(directory['DATA_12'])
+    };
+    const basePositions = this.getInt16Array(directory['PLOC_1'] || directory['PLOC_2']);
+    const bases = this.getString(directory['PBAS_1'] || directory['PBAS_2']);
+    return { traces, basePositions, bases };
+  }
+
+  getInt16Array(entry) {
+    if (!entry) return [];
+    let arr = [];
+    for (let i = 0; i < entry.numElements; i++) arr.push(this.view.getInt16(entry.dataOffset + (i * 2)));
+    return arr;
+  }
+  getString(entry) {
+    if (!entry) return "";
+    let str = "";
+    for (let i = 0; i < entry.numElements; i++) str += String.fromCharCode(this.view.getUint8(entry.dataOffset + i));
+    return str;
+  }
+}
+
+const fileInput   = document.getElementById('fileInput');
+const canvas      = document.getElementById('chromaCanvas');
+const ctx         = canvas.getContext('2d');
+const seqArea     = document.getElementById('seqArea');
+const downloadBtn = document.getElementById('downloadBtn');
+const canvasWrap  = document.getElementById('canvasWrap');
+const tooltip     = document.getElementById('tooltip');
+const selText     = document.getElementById('selText');
+const copySelBtn  = document.getElementById('copySelBtn');
+const selInfo     = document.getElementById('selInfo');
+
+const scrollLeftBtn  = document.getElementById('scrollLeftBtn');
+const scrollRightBtn = document.getElementById('scrollRightBtn');
+const scrollUpBtn    = document.getElementById('scrollUpBtn');
+const scrollDownBtn  = document.getElementById('scrollDownBtn');
+
+const heightSlider = document.getElementById('heightSlider');
+const heightVal    = document.getElementById('heightVal');
+const widthSlider  = document.getElementById('widthSlider');
+const widthVal     = document.getElementById('widthVal');
+
+let currentFileName = "sample";
+let currentData     = null;
+
+let xSpacing        = 2.5;
+let canvasHeight    = 270;
+let baseXPositions  = [];
+
+let selStartIdx = null;
+let selEndIdx   = null;
+let isDragging  = false;
+
+let autoScrollRAF    = null;
+let autoScrollSpeedX = 0;
+let autoScrollSpeedY = 0;
+let lastMouseClientX = null;
+let lastMouseClientY = null;
+const EDGE_ZONE = 60;
+const MAX_SCROLL_SPEED = 18;
+
+fileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  currentFileName = file.name.replace(/\.[^/.]+$/, "");
+
+  const buffer = await file.arrayBuffer();
+  try {
+    const parser = new ABIParser(buffer);
+    const data = parser.parse();
+    currentData = data;
+    resetSelection();
+    renderChromatogram(data);
+    seqArea.value = data.bases;
+    canvasWrap.scrollLeft = 0;
+    canvasWrap.scrollTop  = 0;
+  } catch (err) {
+    alert("Error processing file: " + err.message);
+  }
+});
+
+function computeBaseXPositions(data) {
+  baseXPositions = [];
+  for (let i = 0; i < data.bases.length; i++) baseXPositions.push(data.basePositions[i] * xSpacing);
+}
+
+function renderChromatogram(data) {
+  const numPoints = data.traces.A.length;
+  canvas.width  = Math.max(1, Math.round(numPoints * xSpacing));
+  canvas.height = canvasHeight;
+
+  computeBaseXPositions(data);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  let maxSignal = 100;
+  ['A','C','G','T'].forEach(n => {
+    if (data.traces[n].length) maxSignal = Math.max(maxSignal, ...data.traces[n]);
+  });
+  const yScale = (canvas.height - 70) / maxSignal;
+
+  const drawTrace = (trace, color) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let i = 0; i < trace.length; i++) {
+      const x = i * xSpacing;
+      const y = canvas.height - 20 - (trace[i] * yScale);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  };
+
+  drawTrace(data.traces.A, 'green');
+  drawTrace(data.traces.C, 'blue');
+  drawTrace(data.traces.T, 'red');
+  drawTrace(data.traces.G, 'black');
+
+  ctx.font = "bold 13px monospace";
+  ctx.textAlign = "center";
+  for (let i = 0; i < data.bases.length; i++) {
+    const char = data.bases[i];
+    const x = baseXPositions[i];
+    if (char === 'A') ctx.fillStyle = 'green';
+    else if (char === 'C') ctx.fillStyle = 'blue';
+    else if (char === 'T') ctx.fillStyle = 'red';
+    else ctx.fillStyle = 'black';
+    ctx.fillText(char, x, 30);
+
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(x, 35);
+    ctx.lineTo(x, canvas.height - 20);
+    ctx.stroke();
+  }
+
+  ctx.font = "bold 10px monospace";
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#34495e";
+  for (let i = 0; i < data.bases.length; i++) {
+    const num = i + 1;
+    if (num % 10 === 0 || i === 0) {
+      const x = baseXPositions[i];
+      ctx.fillText(String(num), x, 14);
+      ctx.strokeStyle = "#34495e";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, 16);
+      ctx.lineTo(x, 20);
+      ctx.stroke();
+    }
+  }
+
+  drawSelectionOverlay();
+}
+
+function drawSelectionOverlay() {
+  if (selStartIdx === null || selEndIdx === null) return;
+  const s = Math.min(selStartIdx, selEndIdx);
+  const e = Math.max(selStartIdx, selEndIdx);
+  const x1 = baseXPositions[s];
+  const x2 = baseXPositions[e];
+  ctx.fillStyle = "rgba(41, 128, 185, 0.18)";
+  ctx.fillRect(x1, 0, x2 - x1, canvas.height);
+  ctx.strokeStyle = "#2980b9";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x1, 0); ctx.lineTo(x1, canvas.height);
+  ctx.moveTo(x2, 0); ctx.lineTo(x2, canvas.height);
+  ctx.stroke();
+}
+
+function xToBaseIndex(mouseX) {
+  if (!baseXPositions.length) return null;
+  let lo = 0, hi = baseXPositions.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (baseXPositions[mid] < mouseX) lo = mid + 1;
+    else hi = mid;
+  }
+  let best = lo;
+  if (lo > 0 && Math.abs(baseXPositions[lo-1] - mouseX) < Math.abs(baseXPositions[lo] - mouseX)) best = lo - 1;
+  return best;
+}
+
+function clientXToCanvasX(clientX) {
+  const rect = canvas.getBoundingClientRect();
+  return (clientX - rect.left) * (canvas.width / rect.width);
+}
+function clientYToCanvasY(clientY) {
+  const rect = canvas.getBoundingClientRect();
+  return (clientY - rect.top) * (canvas.height / rect.height);
+}
+
+function getMousePos(evt) {
+  return { x: clientXToCanvasX(evt.clientX), y: clientYToCanvasY(evt.clientY) };
+}
+function getMousePosInContainer(evt) {
+  const rect = canvasWrap.getBoundingClientRect();
+  return { x: evt.clientX - rect.left, y: evt.clientY - rect.top };
+}
+
+canvas.addEventListener('mousedown', (e) => {
+  if (!currentData) return;
+  const { x } = getMousePos(e);
+  const idx = xToBaseIndex(x);
+  if (idx === null) return;
+  isDragging  = true;
+  selStartIdx = idx;
+  selEndIdx   = idx;
+  lastMouseClientX = e.clientX;
+  lastMouseClientY = e.clientY;
+  renderChromatogram(currentData);
+  updateSelectionText();
+  startAutoScrollLoop();
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  if (!currentData) return;
+
+  lastMouseClientX = e.clientX;
+  lastMouseClientY = e.clientY;
+
+  const { x } = getMousePos(e);
+  const idx   = xToBaseIndex(x);
+
+  if (idx !== null && baseXPositions[idx] !== undefined) {
+    const num     = idx + 1;
+    const baseChar = currentData.bases[idx] || '?';
+    const px      = baseXPositions[idx];
+
+    tooltip.style.display = 'block';
+    tooltip.textContent   = `#${num}  ${baseChar}`;
+
+    const wrapRect   = canvasWrap.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    const offsetX = (canvasRect.left - wrapRect.left) + px * (canvasRect.width / canvas.width);
+    const offsetY = (canvasRect.top  - wrapRect.top)  + 40;
+    tooltip.style.left = offsetX + 'px';
+    tooltip.style.top  = offsetY + 'px';
+  } else {
+    tooltip.style.display = 'none';
+  }
+
+  if (isDragging && idx !== null) {
+    selEndIdx = idx;
+    renderChromatogram(currentData);
+    updateSelectionText();
+  }
+
+  updateAutoScrollSpeeds(e);
+});
+
+canvas.addEventListener('mouseup', () => {
+  isDragging = false;
+  stopAutoScrollLoop();
+});
+
+canvas.addEventListener('mouseleave', () => {
+  tooltip.style.display = 'none';
+  if (!isDragging) stopAutoScrollLoop();
+});
+
+canvas.addEventListener('dragstart', (e) => e.preventDefault());
+
+function updateAutoScrollSpeeds(evt) {
+  autoScrollSpeedX = 0;
+  autoScrollSpeedY = 0;
+  if (!isDragging) return;
+
+  const { x, y } = getMousePosInContainer(evt);
+  const w = canvasWrap.clientWidth;
+  const h = canvasWrap.clientHeight;
+
+  if (x < EDGE_ZONE) {
+    autoScrollSpeedX = -Math.ceil(((EDGE_ZONE - x) / EDGE_ZONE) * MAX_SCROLL_SPEED);
+  } else if (x > w - EDGE_ZONE) {
+    autoScrollSpeedX =  Math.ceil(((x - (w - EDGE_ZONE)) / EDGE_ZONE) * MAX_SCROLL_SPEED);
+  }
+
+  if (y < EDGE_ZONE) {
+    autoScrollSpeedY = -Math.ceil(((EDGE_ZONE - y) / EDGE_ZONE) * MAX_SCROLL_SPEED);
+  } else if (y > h - EDGE_ZONE) {
+    autoScrollSpeedY =  Math.ceil(((y - (h - EDGE_ZONE)) / EDGE_ZONE) * MAX_SCROLL_SPEED);
+  }
+}
+
+function startAutoScrollLoop() {
+  if (autoScrollRAF) return;
+  const loop = () => {
+    if (!isDragging) { autoScrollRAF = null; return; }
+
+    if (autoScrollSpeedX !== 0 || autoScrollSpeedY !== 0) {
+      const prevLeft = canvasWrap.scrollLeft;
+      const prevTop  = canvasWrap.scrollTop;
+      canvasWrap.scrollLeft += autoScrollSpeedX;
+      canvasWrap.scrollTop  += autoScrollSpeedY;
+
+      const scrolled = (canvasWrap.scrollLeft !== prevLeft) || (canvasWrap.scrollTop !== prevTop);
+
+      if (scrolled && lastMouseClientX !== null) {
+        const xInCanvas = clientXToCanvasX(lastMouseClientX);
+        const newIdx = xToBaseIndex(xInCanvas);
+        if (newIdx !== null && newIdx !== selEndIdx) {
+          selEndIdx = newIdx;
+          renderChromatogram(currentData);
+          updateSelectionText();
+        }
+      }
+    }
+    autoScrollRAF = requestAnimationFrame(loop);
+  };
+  autoScrollRAF = requestAnimationFrame(loop);
+}
+
+function stopAutoScrollLoop() {
+  if (autoScrollRAF) {
+    cancelAnimationFrame(autoScrollRAF);
+    autoScrollRAF = null;
+  }
+  autoScrollSpeedX = 0;
+  autoScrollSpeedY = 0;
+}
+
+function updateSelectionText() {
+  if (selStartIdx === null || selEndIdx === null || !currentData) {
+    selText.value = "";
+    selInfo.textContent = "";
+    return;
+  }
+  const s = Math.min(selStartIdx, selEndIdx);
+  const e = Math.max(selStartIdx, selEndIdx);
+  const subseq = currentData.bases.slice(s, e + 1);
+  selText.value = subseq;
+  selInfo.textContent = `— from ${s + 1} to ${e + 1} (length: ${e - s + 1} nt)`;
+}
+
+function resetSelection() {
+  selStartIdx = null;
+  selEndIdx   = null;
+  selText.value = "";
+  selInfo.textContent = "";
+}
+
+copySelBtn.addEventListener('click', async () => {
+  if (!selText.value) {
+    alert("Please drag over the chromatogram to select a range first.");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(selText.value);
+    copySelBtn.textContent = "Copied ✓";
+    setTimeout(() => copySelBtn.textContent = "Copy Range", 1500);
+  } catch (err) {
+    selText.select();
+    document.execCommand('copy');
+    copySelBtn.textContent = "Copied ✓";
+    setTimeout(() => copySelBtn.textContent = "Copy Range", 1500);
+  }
+});
+
+const SCROLL_STEP = 120;
+function smoothScrollBy(dx, dy) {
+  canvasWrap.scrollBy({ left: dx, top: dy, behavior: 'smooth' });
+}
+scrollLeftBtn .addEventListener('click', () => smoothScrollBy(-SCROLL_STEP, 0));
+scrollRightBtn.addEventListener('click', () => smoothScrollBy( SCROLL_STEP, 0));
+scrollUpBtn   .addEventListener('click', () => smoothScrollBy(0, -SCROLL_STEP));
+scrollDownBtn .addEventListener('click', () => smoothScrollBy(0,  SCROLL_STEP));
+
+heightSlider.addEventListener('input', () => {
+  canvasHeight = parseInt(heightSlider.value, 10);
+  heightVal.textContent = canvasHeight;
+  if (currentData) renderChromatogram(currentData);
+});
+
+widthSlider.addEventListener('input', () => {
+  xSpacing = parseInt(widthSlider.value, 10) / 10;
+  widthVal.textContent = xSpacing.toFixed(1);
+  if (currentData) renderChromatogram(currentData);
+});
+
+downloadBtn.addEventListener('click', () => {
+  const fastaContent = `>${currentFileName}_edited\n${seqArea.value.trim()}\n`;
+  const blob = new Blob([fastaContent], { type: 'text/plain' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `${currentFileName}.fasta`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+/*
+ * Developed by Dr. Abbas Soleimani-Delfan
+ */
+</script>
+
+</body>
+</html>
